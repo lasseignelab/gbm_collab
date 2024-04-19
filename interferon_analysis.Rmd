@@ -1,0 +1,439 @@
+---
+title: "interferon_analysis"
+output: html_document
+date: "2024-03-14"
+---
+```{r}
+library(tximport)
+library(DESeq2)
+library(tidyverse)
+library(decoupleR)
+library(fgsea)
+library(org.Hs.eg.db)
+library(here)
+```
+
+
+### Reading in all quant files
+```{r}
+# Set the path to the directory containing your .sf files
+sf_dir <- ("/data/project/lasseigne_lab/Vish/GBM_collab_data/salmon_qc/all_quant_files/")
+
+# Create a vector of file paths to the .sf files
+sf_files <- list.files(sf_dir, pattern = "*.sf$", full.names = TRUE)
+
+# Optionally, create a sample names vector by removing the path and file extension
+sample_names <- gsub(".sf$", "", basename(sf_files))
+```
+
+
+### Creating tx2gene data frame
+```{r}
+# use the import function to read in the gtf file
+gtf <- rtracklayer::import(here("data","gencode.v45.basic.annotation.gtf.gz"))
+
+head(gtf)
+
+gtf_df<- as.data.frame(gtf)
+
+# this file is used to import the salmon output to summarize the counts from 
+# transcript level to gene level
+tx2gene<- gtf_df %>%
+        filter(type == "transcript") %>%
+        select(transcript_id, gene_id)
+
+
+# this file is used to map the ENSEMBL gene id to gene symbols in the DESeq2 results
+gene_name_map<- gtf_df %>% 
+        filter(type == "gene") %>% 
+        select(gene_id, gene_name) 
+```
+
+
+### Reading in metadata and count matrix
+```{r}
+# Import the quantification files
+txi <- tximport(files = sf_files, type = "salmon", txOut = FALSE, tx2gene = tx2gene)
+# Manually set the column names of the counts matrix
+colnames(txi$counts) <- sample_names
+
+# Read in metadata
+metadata <- read.csv(here("data","metadata.txt"), header = TRUE)
+radiation <- metadata %>% select(Run, Radiation_Sensitivity) %>% column_to_rownames(var = "Run")
+#tmz <- metadata %>% select(Run, temozolomide_sensitivity) %>% column_to_rownames(var = "Run")
+```
+
+### Running DESeq2 analysis across all samples
+```{r}
+dds_radiation <- DESeqDataSetFromTximport(txi, radiation, ~ Radiation_Sensitivity)
+
+#dds_radiation$condition <- relevel(dds_radiation$condition, ref = "sensitive")
+
+dds_radiation <- DESeq(dds_radiation)
+
+res_radiation <- results(dds_radiation, contrast = c("Radiation_Sensitivity", "resistant", "sensitive"))
+
+res_radiation
+
+res_radiation %>% as.data.frame() %>%
+  arrange(padj) %>%
+  ggplot(aes(x=pvalue)) +
+  geom_histogram(color = "white", bins = 50)
+
+res_radiation %>% as.data.frame() %>%
+        tibble::rownames_to_column(var = "gene_id") %>%
+        filter(!is.na(pvalue)) %>%
+        mutate(pvalue_bin = if_else(pvalue > 0.75, "high", "low")) %>%
+        ggplot(aes(x= pvalue_bin, y = log2(baseMean))) +
+        geom_boxplot()
+
+dds_rad_trunc <- dds_radiation[rowSums(counts(dds_radiation)) > 20,]
+
+dds_rad_trunc <- DESeq(dds_rad_trunc)
+
+res_rad_trunc <- results(dds_rad_trunc, contrast = c("Radiation_Sensitivity", "resistant", "sensitive"))
+
+res_rad_trunc %>% as.data.frame() %>%
+  arrange(padj) %>%
+  ggplot(aes(x=pvalue)) +
+  geom_histogram(color = "white", bins = 50)
+
+res_rad_trunc %>% as.data.frame() %>%
+        tibble::rownames_to_column(var = "gene_id") %>%
+        filter(!is.na(pvalue)) %>%
+        mutate(pvalue_bin = if_else(pvalue > 0.75, "high", "low")) %>%
+        ggplot(aes(x= pvalue_bin, y = log2(baseMean))) +
+        geom_boxplot()
+
+summary(res_rad_trunc)
+
+add_gene_name<- function(res){
+  df<- as.data.frame(res) %>%
+    tibble::rownames_to_column(var = "gene_id") %>%
+    left_join(gene_name_map) %>%
+    arrange(padj, abs(log2FoldChange))
+  return(df)
+}
+
+res_rad_trunc <- add_gene_name(res_rad_trunc)
+head(res_rad_trunc)
+
+##################################################
+## Calculate vst and perform PCA to visualize the variance of samples
+dds_rad_vst <- vst(dds_rad_trunc, blind = FALSE)
+
+pcaPlot <- plotPCA(dds_rad_vst, intgroup = "Radiation_Sensitivity", returnData = TRUE)
+pcaPlotGg <- plotPCA(dds_rad_vst, intgroup = "Radiation_Sensitivity", returnData = FALSE)
+
+labels <- rownames(pcaPlot)
+
+# Add labels to the plot
+pcaPlotGg + geom_text(data = pcaPlot, aes(label = labels), vjust = 2, hjust = 0.5, size = 3, check_overlap = TRUE)
+
+
+```
+
+### Performing Progeny pathway analysis across all samples
+```{r}
+
+progeny <- get_resource('PROGENy')
+progeny <- distinct(progeny, pathway, genesymbol, .keep_all = TRUE)
+
+# Function to read and rearrange a .gmt file
+readAndRearrangeGMT <- function(gmtFile) {
+  # Read the .gmt file
+  lines <- readLines(gmtFile)
+  
+  # Initialize an empty list to store the data
+  dataList <- list()
+  
+  # Loop through each line of the .gmt file
+  for (line in lines) {
+    # Split the line into components
+    elements <- strsplit(line, "\t")[[1]]
+    
+    # Extract the geneset name, removing the "HALLMARK_" prefix for readability
+    geneset <- gsub("HALLMARK_", "", elements[1])
+    
+    # Extract the genesymbols (starting from the 3rd element)
+    genesymbols <- elements[-(1:2)]
+    
+    # Create a data frame for this line
+    df <- data.frame(
+      genesymbol = genesymbols,
+      collection = "hallmark",
+      geneset = geneset,
+      stringsAsFactors = FALSE
+    )
+    
+    # Append the data frame to the list
+    dataList[[length(dataList) + 1]] <- df
+  }
+  
+  # Combine all data frames into one
+  combinedDF <- do.call(rbind, dataList)
+  
+  return(combinedDF)
+}
+
+# Function usage
+gmtFile <- here("data","h.all.v2023.2.Hs.symbols.gmt")
+geneSetsDF <- readAndRearrangeGMT(gmtFile)
+
+# View the first few rows of the data frame
+head(geneSetsDF)
+
+```
+
+
+### Plotting progeny results
+```{r}
+top_genes_rad = res_rad_trunc %>% filter(padj < 0.05) %>%  column_to_rownames(var = "gene_name") %>% select(stat)
+
+contrast_acts <- run_wmean(mat=top_genes_rad, net=progeny, .source='pathway', .target='genesymbol',
+                  .mor='weight', times = 100, minsize = 5)
+contrast_acts
+
+# Filter norm_wmean
+f_contrast_acts <- contrast_acts %>%
+  filter(statistic == 'norm_wmean')
+
+# Plot
+ggplot(f_contrast_acts, aes(x = reorder(source, score), y = score)) + 
+    geom_bar(aes(fill = score), stat = "identity") +
+    scale_fill_gradient2(low = "darkblue", high = "indianred", 
+        mid = "whitesmoke", midpoint = 0) + 
+    theme_minimal() +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x = 
+            element_text(angle = 45, hjust = 1, size =10, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+    xlab("Pathways")
+
+ora_rad <- run_ora(top_genes_rad, geneSetsDF)
+```
+
+### Running pairwise DESeq2 analysis
+```{r}
+## Function to run pairwise DESeq2 analysis 
+
+
+pairwise_DESeq2_analysis <- function(metadata, sf_files, sample_names, tx2gene) {
+  results_list <- list()
+  
+  # Ensure metadata's Run column matches the order of sf_files and sample_names
+  metadata <- metadata %>% filter(Run %in% sample_names)
+  
+  for (individual in unique(metadata$Individual)) {
+    # Filter metadata for the current individual
+    individual_metadata <- metadata %>%
+      filter(Individual == individual) %>%
+      select(Run, Radiation_Sensitivity)
+    
+    # Select files and names for the current individual
+    individual_files <- sf_files[sample_names %in% individual_metadata$Run]
+    individual_sample_names <- sample_names[sample_names %in% individual_metadata$Run]
+    
+    # Run tximport for the current individual
+    individual_txi <- tximport(files = individual_files, type = "salmon", txOut = FALSE, tx2gene = tx2gene)
+    # Manually set the column names of the counts matrix
+    colnames(individual_txi$counts) <- individual_sample_names
+    
+    # Create DESeqDataSet
+    colData <- DataFrame(Radiation_Sensitivity = individual_metadata$Radiation_Sensitivity)
+    rownames(colData) <- individual_metadata$Run
+    dds_individual <- DESeqDataSetFromTximport(txi = individual_txi,
+                                               colData = colData,
+                                               design = ~ Radiation_Sensitivity)
+    
+    # Preprocessing: Filter out genes with low counts
+    dds_individual <- dds_individual[rowSums(counts(dds_individual)) > 20, ]
+    
+    # Run DESeq analysis
+    dds_individual <- DESeq(dds_individual)
+    
+    # Extract results
+    res_individual <- results(dds_individual, contrast = c("Radiation_Sensitivity", "resistant", "sensitive"))
+    
+    # Store results
+    results_list[[individual]] <- res_individual
+  }
+  
+  return(results_list)
+}
+
+# Function usage
+results_list <- pairwise_DESeq2_analysis(metadata, sf_files, sample_names, tx2gene)
+
+```
+
+```{r}
+# Initialize a list to store the filtered results for each individual
+filtered_results_list <- list()
+
+# Loop through each individual's DESeq2 results in results_list
+for (individual in names(results_list)) {
+  # Extract the DESeq2 results for the current individual
+  res_individual <- results_list[[individual]]
+  
+  # Convert to a data frame and apply filtering criteria
+  filtered_res_individual <- as.data.frame(res_individual) %>%
+    rownames_to_column(var = "gene_name") %>%
+    filter(padj < 0.05, abs(log2FoldChange) > 1.5)
+  
+  # Store the filtered results in the list, named by the individual
+  filtered_results_list[[individual]] <- filtered_res_individual
+}
+
+# filtered_results_list now contains the filtered results for each individual
+
+```
+
+```{r}
+
+# Initialize a list to store the filtered and annotated results for each individual
+summarize_geneset <- function(results_list) {
+  summarized_results_list <- list()
+  
+  for (individual in names(results_list)) {
+    res_individual <- results_list[[individual]]
+    
+    filtered_res_individual <- as.data.frame(res_individual) %>%
+      rownames_to_column(var = "gene_name") %>%
+      filter(padj < 0.05, abs(log2FoldChange) > 1.5) %>%
+      mutate(gene_name = gsub("\\..*", "", gene_name)) # Truncate decimal in gene_name
+    
+    if (nrow(filtered_res_individual) > 0) {
+      ens2symbol <- tryCatch({
+        AnnotationDbi::select(org.Hs.eg.db,
+                              keys = filtered_res_individual$gene_name, 
+                              columns = "SYMBOL",
+                              keytype = "ENSEMBL")
+      }, error = function(e) {
+        message("Error in AnnotationDbi::select for ", individual, ": ", e$message)
+        return(data.frame(ENSEMBL = filtered_res_individual$gene_name, SYMBOL = NA))
+      })
+      
+      ens2symbol <- as_tibble(ens2symbol)
+      annotated_filtered_res_individual <- left_join(filtered_res_individual, ens2symbol, by = c("gene_name" = "ENSEMBL"))
+      
+      # Process the annotated, filtered results as per the new requirements
+      res2 <- annotated_filtered_res_individual %>%
+        dplyr::select(SYMBOL, stat) %>%
+        na.omit() %>%
+        dplyr::distinct() %>%
+        dplyr::group_by(SYMBOL) %>%
+        dplyr::summarize(stat = mean(stat), .groups = 'drop')
+      
+      summarized_results_list[[individual]] <- res2
+    } else {
+      summarized_results_list[[individual]] <- tibble()
+    }
+  }
+  
+  return(summarized_results_list)
+}
+
+# Assuming results_list and tx2gene are already defined
+summarized_results_list <- summarize_geneset(results_list)
+
+
+
+```
+
+
+### Perform and plot fgsea analysis
+MsgiDB:
+- Hallmark pathways
+- Canonical pathways
+- KEGG Medicus pathways (subset of canonical pathways)
+```{r}
+
+perform_fgsea_and_plot <- function(summarized_results_list, gmt_file_path, pathway_name) {
+  # Load the pathways from a .gmt file into a named list
+  pathways.hallmark <- gmtPathways(gmt_file_path)
+  
+  # Initialize a list to store ggplot objects for each individual
+  plot_list <- list()
+  
+  # Loop through each individual in the summarized_results_list
+  for (individual in names(summarized_results_list)) {
+    res2 <- summarized_results_list[[individual]]
+    
+    # Check if res2 is not NULL or empty
+    if (!is.null(res2) && nrow(res2) > 0) {
+      # Convert the summarized results to a named vector of ranks
+      ranks <- deframe(res2)
+      
+      # Perform fgsea analysis
+      fgseaRes <- fgsea(pathways = pathways.hallmark, stats = ranks)
+      
+      # Tidy the fgsea results and arrange by NES
+      fgseaResTidy <- fgseaRes %>%
+        as_tibble() %>%
+        arrange(desc(NES))
+      
+      # Select top 10 upregulated pathways
+    top10_up <- fgseaResTidy %>%
+    filter(NES > 0) %>%
+    slice_max(order_by = NES, n = 10)
+
+    # Select top 10 downregulated pathways
+    top10_down <- fgseaResTidy %>%
+    filter(NES < 0) %>%
+    slice_min(order_by = NES, n = 10)
+
+    # Combine top 10 up and down for a combined view
+    top10_combined <- bind_rows(top10_up, top10_down)
+      
+      # Plot the fgsea results
+      p <- ggplot(top10_combined, aes(reorder(pathway, NES), NES)) +
+        geom_col(aes(fill = padj < 0.05)) +
+        coord_flip() +
+        labs(x = "Pathway", y = "Normalized Enrichment Score",
+             title = paste("Hallmark pathways NES from GSEA for", individual)) + 
+        theme_bw() +
+        theme(plot.title = element_text(size = 8),
+              axis.text.y = element_text(size = 4, face = "bold"),  # Decrease size of pathway names
+          axis.text.x = element_text(size = 8, face = "bold"),  # Adjust axis label sizes if needed
+          plot.margin = margin(3, 3, 3, 3, "mm")) # Adjust the size 
+      
+      # Save the plot
+      file_name <- here("fig", paste0("fgsea_plot_", gsub(" ", "_", individual),"_", pathway_name, ".png"))
+      ggsave(file_name, plot = p, device = "png", width = 10, height = 6, dpi = 300)
+      
+      # Store the plot in the list
+      plot_list[[individual]] <- p
+    } else {
+      plot_list[[individual]] <- NULL
+    }
+  }
+  
+  return(plot_list)
+}
+
+# Function usage
+# Assuming summarized_results_list is already defined and contains your summarized DESeq2 results
+
+gmt_file_hallmark <- here("data","h.all.v2023.2.Hs.symbols.gmt")
+gmt_file_canonical <- here("data","c2.cp.v2023.2.Hs.symbols.gmt")
+gmt_file_keggmedicus <- here("data","c2.cp.kegg_medicus.v2023.2.Hs.symbols.gmt")
+plot_list1 <- perform_fgsea_and_plot(summarized_results_list, gmt_file_hallmark, "hallmark_pathway")
+plot_list2 <- perform_fgsea_and_plot(summarized_results_list, gmt_file_canonical, "canonical_pathway")
+plot_list3 <- perform_fgsea_and_plot(summarized_results_list, gmt_file_keggmedicus, "keggmedicus_pathway")
+
+plot_list1
+plot_list2
+plot_list3
+
+
+```
+
+
+
+
+
+
+
