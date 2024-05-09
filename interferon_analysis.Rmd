@@ -433,6 +433,22 @@ plot_list3
 
 
 
+Methods:
+
+RNAseq analysis
+
+Data Acquisition and Preprocessing
+Transcriptomic data was obtained from GEO (accession number GEO206225), comprising RNA-seq reads for GBM patient-derived xenograft (PDX) models of acquired radiation-therapy selected (RTS) resistance compared with same-patient, treatment naïve (RTU) PDX. Quality control was performed using FastQC (v0.11.9) pre-trimming. The reads were trimmed using Trim Galore (v0.6.7) to remove adapters and low-quality bases with a Phred score below 20. 
+
+Transcriptome Annotation and Quantification
+Trimmed reads were then aligned and quantified using Salmon (v0.12.0) against the Gencode GRCh38.p14 release 45 reference transcriptome using --gencode and -k 31 flags for index generation and -l ISR, --gcBias, and --validateMappings flags for quantification. 
+
+Differential Expression Analysis
+All subsequent analysis was done on R(v4.3.2). The Gencode v45 basic annotation file was used to generate tx2gene table. The tximport (v1.28.0) package was used to summarize Salmon outputs from transcript-level to gene-level counts, for downstream differential expression analysis. Differential expression analysis was conducted using DESeq2 (v1.40.2), after filtering genes with low counts (< 20). The differential expression was done using DESeq function to perform pairwise comparisons between radiation-sensitive and radiation-resistant samples. Genes with padj < 0.05 and absolute log2 fold change of > 1.5 were considered for downstream analysis.
+
+Functional Enrichment Analysis
+Functional enrichment analysis was performed using the fgsea package (v1.26.0) to assess the biological significance of the differentially expressed genes. Pre-defined gene sets including Hallmark, Canonical, and KEGG Medicus pathways were used from MSigDB v2023.2 database. Results from the fgsea analysis were visualized using ggplot2 (v3.5.0) to generate plots of the top 10 upregulated and downregulated enriched pathways based on the normalized enrichment scores (NES).
+
 
 
 
