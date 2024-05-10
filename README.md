@@ -1,5 +1,5 @@
 
-![Logo](https://www.lasseigne.org/img/main/lablogo.png)
+<img src="https://www.lasseigne.org/img/main/lablogo.png" width="100" height="100">
 ## Differential expression and pathway analysis of GBM patient-derived xenograft (PDX) models
 
 Analysis of RNA-seq reads for GBM patient-derived xenograft (PDX) models of acquired radiation-therapy selected (RTS) resistance compared with same-patient, treatment naïve (RTU) PDX.
